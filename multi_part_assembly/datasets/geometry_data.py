@@ -21,6 +21,7 @@ class GeometryPartDataset(Dataset):
         data_fn,
         data_keys,
         category='',
+        total_points=50000,
         num_points=1000,
         min_num_part=2,
         max_num_part=20,
@@ -32,6 +33,7 @@ class GeometryPartDataset(Dataset):
         self.category = category if category.lower() != 'all' else ''
         self.data_dir = data_dir
         self.num_points = num_points
+        self.total_points = total_points
         self.min_num_part = min_num_part
         self.max_num_part = max_num_part  # ignore shapes with more parts
         self.shuffle_parts = shuffle_parts  # shuffle part orders
@@ -43,6 +45,8 @@ class GeometryPartDataset(Dataset):
             self.data_list = self.data_list[:overfit]
 
         # additional data to load, e.g. ('part_ids', 'instance_label')
+        if isinstance(data_keys, str):
+            data_keys = [data_keys]
         self.data_keys = data_keys
 
     def _read_data(self, data_fn):
@@ -98,13 +102,6 @@ class GeometryPartDataset(Dataset):
         pc = pc[order]
         return pc
 
-    def _pad_data(self, data):
-        """Pad data to shape [`self.max_num_part`, data.shape[1], ...]."""
-        data = np.array(data)
-        pad_shape = (self.max_num_part, ) + tuple(data.shape[1:])
-        pad_data = np.zeros(pad_shape, dtype=np.float32)
-        pad_data[:data.shape[0]] = data
-        return pad_data
 
     def _get_pcs(self, data_folder):
         """Read mesh and sample point cloud from a folder."""
@@ -124,15 +121,31 @@ class GeometryPartDataset(Dataset):
             trimesh.load(os.path.join(data_folder, mesh_file))
             for mesh_file in mesh_files
         ]
-        pcs = [
-            trimesh.sample.sample_surface(mesh, self.num_points)[0]
-            for mesh in meshes
-        ]
-        return np.stack(pcs, axis=0)
+        
+        # calculate surface area and ratio
+        surface_areas = [mesh.area for mesh in meshes]
+        total_area = sum(surface_areas)
+        pcs_ratios = [area / total_area for area in surface_areas]
 
+        # sample
+        pcs = []
+        for mesh, ratio in zip(meshes, pcs_ratios):
+            num_sample = int(self.total_points * ratio)
+            samples = trimesh.sample.sample_surface(mesh, num_sample)[0]
+            pcs.append(samples)
+        
+        return pcs
+
+    def _get_breaking_pcs(self, pcs):
+        breaking_pcs = []
+        
+        return breaking_pcs
+        
+        
+    
     def __getitem__(self, index):
         pcs = self._get_pcs(self.data_list[index])
-        num_parts = pcs.shape[0]
+        num_parts = len(pcs)
         cur_pts, cur_quat, cur_trans = [], [], []
         for i in range(num_parts):
             pc = pcs[i]
@@ -141,9 +154,7 @@ class GeometryPartDataset(Dataset):
             cur_pts.append(self._shuffle_pc(pc))
             cur_quat.append(gt_quat)
             cur_trans.append(gt_trans)
-        cur_pts = self._pad_data(np.stack(cur_pts, axis=0))  # [P, N, 3]
-        cur_quat = self._pad_data(np.stack(cur_quat, axis=0))  # [P, 4]
-        cur_trans = self._pad_data(np.stack(cur_trans, axis=0))  # [P, 3]
+        
         """
         data_dict = {
             'part_pcs': MAX_NUM x N x 3
@@ -154,15 +165,6 @@ class GeometryPartDataset(Dataset):
 
             'part_quat': MAX_NUM x 4
                 Rotation as quaternion.
-
-            'part_valids': MAX_NUM
-                1 for shape parts, 0 for padded zeros.
-
-            'instance_label': MAX_NUM x 0, useless
-
-            'part_label': MAX_NUM x 0, useless
-
-            'part_ids': MAX_NUM, useless
 
             'data_id': int
                 ID of the data.
@@ -175,35 +177,9 @@ class GeometryPartDataset(Dataset):
             'part_quat': cur_quat,
             'part_trans': cur_trans,
         }
-        # valid part masks
-        valids = np.zeros((self.max_num_part), dtype=np.float32)
-        valids[:num_parts] = 1.
-        data_dict['part_valids'] = valids
-        # data_id
         data_dict['data_id'] = index
-        # instance_label is useless in non-semantic assembly
-        # keep here for compatibility with semantic assembly
-        # make its last dim 0 so that we concat nothing
-        instance_label = np.zeros((self.max_num_part, 0), dtype=np.float32)
-        data_dict['instance_label'] = instance_label
-        # the same goes to part_label
-        part_label = np.zeros((self.max_num_part, 0), dtype=np.float32)
-        data_dict['part_label'] = part_label
-
-        for key in self.data_keys:
-            if key == 'part_ids':
-                cur_part_ids = np.arange(num_parts)  # p
-                data_dict['part_ids'] = self._pad_data(cur_part_ids)
-
-            elif key == 'valid_matrix':
-                out = np.zeros((self.max_num_part, self.max_num_part),
-                               dtype=np.float32)
-                out[:num_parts, :num_parts] = 1.
-                data_dict['valid_matrix'] = out
-
-            else:
-                raise ValueError(f'ERROR: unknown data {key}')
-
+        # 
+        
         return data_dict
 
     def __len__(self):
@@ -216,7 +192,7 @@ def build_geometry_dataloader(cfg):
         data_fn=cfg.data.data_fn.format('train'),
         data_keys=cfg.data.data_keys,
         category=cfg.data.category,
-        num_points=cfg.data.num_pc_points,
+        total_points=cfg.data.total_points,
         min_num_part=cfg.data.min_num_part,
         max_num_part=cfg.data.max_num_part,
         shuffle_parts=cfg.data.shuffle_parts,

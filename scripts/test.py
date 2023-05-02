@@ -10,7 +10,7 @@ import torch
 import pytorch_lightning as pl
 
 from multi_part_assembly.datasets import build_dataloader
-from multi_part_assembly.models import build_model
+# from multi_part_assembly.models import build_model
 
 
 @torch.no_grad()
@@ -95,4 +95,6 @@ if __name__ == '__main__':
     cfg.freeze()
     print(cfg)
 
-    test(cfg)
+
+    _, val_loader = build_dataloader(cfg)
+    # test(cfg)

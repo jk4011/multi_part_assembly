@@ -1,7 +1,7 @@
 import torch
 from torch.cuda.amp import custom_fwd, custom_bwd
 
-import chamfer_cuda
+# import chamfer_cuda
 
 
 def safe_sqrt(x, eps=1e-12):
