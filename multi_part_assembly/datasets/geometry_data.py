@@ -6,6 +6,9 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from torch.utils.data import Dataset, DataLoader
+import torch
+
+from knn_cuda import KNN
 
 
 class GeometryPartDataset(Dataset):
@@ -77,7 +80,7 @@ class GeometryPartDataset(Dataset):
     @staticmethod
     def _recenter_pc(pc):
         """pc: [N, 3]"""
-        centroid = np.mean(pc, axis=0)
+        centroid = pc.mean(axis=0)
         pc = pc - centroid[None]
         return pc, centroid
 
@@ -88,6 +91,7 @@ class GeometryPartDataset(Dataset):
             rot_mat = R.from_euler('xyz', rot_euler, degrees=True).as_matrix()
         else:
             rot_mat = R.random().as_matrix()
+        rot_mat = torch.Tensor(rot_mat)
         pc = (rot_mat @ pc.T).T
         quat_gt = R.from_matrix(rot_mat.T).as_quat()
         # we use scalar-first quaternion
@@ -102,6 +106,56 @@ class GeometryPartDataset(Dataset):
         pc = pc[order]
         return pc
 
+
+    def _knn(self, src, dst, k=1, is_naive=False):
+        """return k nearest neighbors using GPU"""
+        if len(src) * len(dst) > 10e8:
+            # TODO: optimize memory through recursion
+            pass
+
+        if not isinstance(src, torch.Tensor):
+            src = torch.tensor(src)
+        if not isinstance(dst, torch.Tensor):
+            dst = torch.tensor(dst)
+        
+        assert(len(src.shape) == 2)
+        assert(len(dst.shape) == 2)
+        assert(src.shape[-1] == dst.shape[-1])
+        
+        src = src.cuda()
+        dst = dst.cuda()
+        
+        if is_naive:
+
+            src = src.reshape(-1, 1, src.shape[-1])
+            distance = torch.norm(src - dst, dim=-1)
+
+            knn = distance.topk(k, largest=False)
+            distance = knn.values.ravel()
+            indices = knn.indices.ravel()
+        else:
+            knn = KNN(k=1, transpose_mode=True)
+            distance, indices = knn(dst[None, :], src[None, :])
+            distance = distance.ravel()
+            indices = indices.ravel()
+
+        return distance.cpu(), indices.cpu()
+
+    def _get_breaking_idxs(self, points, threshold=0.01):
+        indices = []
+
+        for i in range(len(points)):
+            idx_i = torch.zeros(len(points[i]))
+            idx_i = idx_i.to(torch.bool)
+
+            for j in range(len(points)):
+                if i == j:
+                    continue
+                distances, _ = self._knn(points[i], points[j])
+                idx_i = torch.logical_or(idx_i, distances < threshold)
+            indices.append(idx_i)
+        
+        return indices
 
     def _get_pcs(self, data_folder):
         """Read mesh and sample point cloud from a folder."""
@@ -132,38 +186,44 @@ class GeometryPartDataset(Dataset):
         for mesh, ratio in zip(meshes, pcs_ratios):
             num_sample = int(self.total_points * ratio)
             samples = trimesh.sample.sample_surface(mesh, num_sample)[0]
-            pcs.append(samples)
+            pcs.append(torch.Tensor(samples))
         
         return pcs
 
-    def _get_breaking_pcs(self, pcs):
-        breaking_pcs = []
-        
-        return breaking_pcs
         
         
     
     def __getitem__(self, index):
         pcs = self._get_pcs(self.data_list[index])
+        breaking_idxs = self._get_breaking_idxs(pcs)
+        
         num_parts = len(pcs)
-        cur_pts, cur_quat, cur_trans = [], [], []
+        quat, trans = [], []
         for i in range(num_parts):
             pc = pcs[i]
+            
             pc, gt_trans = self._recenter_pc(pc)
             pc, gt_quat = self._rotate_pc(pc)
-            cur_pts.append(self._shuffle_pc(pc))
-            cur_quat.append(gt_quat)
-            cur_trans.append(gt_trans)
+            quat.append(gt_quat)
+            trans.append(gt_trans)
+            
+            pcs[i] = self._shuffle_pc(pc)
+        
+        breaking_pcs = [pc[idx] for pc, idx in zip(pcs, breaking_idxs)]
+            
         
         """
         data_dict = {
-            'part_pcs': MAX_NUM x N x 3
+            'pcs': MAX_NUM x M_i x 3
                 The points sampled from each part.
+                
+            'breaking_pcs': MAX_NUM x N_i x 3
+                The points sampled from broken surface.
 
-            'part_trans': MAX_NUM x 3
+            'trans': MAX_NUM x 3
                 Translation vector
 
-            'part_quat': MAX_NUM x 4
+            'quat': MAX_NUM x 4
                 Rotation as quaternion.
 
             'data_id': int
@@ -171,14 +231,18 @@ class GeometryPartDataset(Dataset):
 
         }
         """
+        import jhutil;jhutil.jhprint(1111, pcs)
+        import jhutil;jhutil.jhprint(2222, breaking_pcs)
+        import jhutil;jhutil.jhprint(3333, quat)
+        import jhutil;jhutil.jhprint(4444, trans)
 
         data_dict = {
-            'part_pcs': cur_pts,
-            'part_quat': cur_quat,
-            'part_trans': cur_trans,
+            'pcs': pcs,
+            'breaking_pcs': breaking_pcs,
+            'quat': quat,
+            'trans': trans,
+            'data_id': index
         }
-        data_dict['data_id'] = index
-        # 
         
         return data_dict
 
