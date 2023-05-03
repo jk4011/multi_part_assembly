@@ -41,7 +41,7 @@ class GeometryPartDataset(Dataset):
         self.max_num_part = max_num_part  # ignore shapes with more parts
         self.shuffle_parts = shuffle_parts  # shuffle part orders
         self.rot_range = rot_range  # rotation range in degree
-
+        
         # list of fracture folder path
         self.data_list = self._read_data(data_fn)
         if overfit > 0:
@@ -75,6 +75,7 @@ class GeometryPartDataset(Dataset):
                 num_parts = len(os.listdir(os.path.join(self.data_dir, frac)))
                 if self.min_num_part <= num_parts <= self.max_num_part:
                     data_list.append(frac)
+                    
         return data_list
 
     @staticmethod
@@ -125,23 +126,25 @@ class GeometryPartDataset(Dataset):
         src = src.cuda()
         dst = dst.cuda()
         
-        if is_naive:
-
+        if is_naive: 
             src = src.reshape(-1, 1, src.shape[-1])
             distance = torch.norm(src - dst, dim=-1)
 
             knn = distance.topk(k, largest=False)
-            distance = knn.values.ravel()
-            indices = knn.indices.ravel()
-        else:
+            distance = knn.values
+            indices = knn.indices
+            
+        else: # memory efficient
             knn = KNN(k=1, transpose_mode=True)
-            distance, indices = knn(dst[None, :], src[None, :])
-            distance = distance.ravel()
-            indices = indices.ravel()
+            distance, indices = knn(dst[None, :], src[None, :]) 
+        
+        distance = distance.ravel().cpu()
+        indices = indices.ravel().cpu()
 
-        return distance.cpu(), indices.cpu()
+        return distance, indices
 
-    def _get_breaking_idxs(self, points, threshold=0.01):
+    def _get_broken_pcs_idxs(self, points, threshold=0.01):
+        import jhutil;jhutil.jhprint(0000, points)
         indices = []
 
         for i in range(len(points)):
@@ -185,18 +188,24 @@ class GeometryPartDataset(Dataset):
         pcs = []
         for mesh, ratio in zip(meshes, pcs_ratios):
             num_sample = int(self.total_points * ratio)
+            if num_sample < 10:
+                num_sample = 10
             samples = trimesh.sample.sample_surface(mesh, num_sample)[0]
             pcs.append(torch.Tensor(samples))
         
         return pcs
 
-        
-        
+    def get_original_pcs(self, index):
+        pcs = self._get_pcs(self.data_list[index])
+        return pcs
     
     def __getitem__(self, index):
+            
         pcs = self._get_pcs(self.data_list[index])
-        breaking_idxs = self._get_breaking_idxs(pcs)
+
+        broken_indices = self._get_broken_pcs_idxs(pcs)
         
+        # random rotate and translate
         num_parts = len(pcs)
         quat, trans = [], []
         for i in range(num_parts):
@@ -207,17 +216,20 @@ class GeometryPartDataset(Dataset):
             quat.append(gt_quat)
             trans.append(gt_trans)
             
-            pcs[i] = self._shuffle_pc(pc)
+            pcs[i] = pc
         
-        breaking_pcs = [pc[idx] for pc, idx in zip(pcs, breaking_idxs)]
-            
+        broken_pcs = [pc[idx] for pc, idx in zip(pcs, broken_indices)]
+        
+        # shuffle points
+        pcs = [self._shuffle_pc(pc) for pc in pcs]
+        broken_pcs = [self._shuffle_pc(pc) for pc in broken_pcs]
         
         """
         data_dict = {
             'pcs': MAX_NUM x M_i x 3
                 The points sampled from each part.
                 
-            'breaking_pcs': MAX_NUM x N_i x 3
+            'broken_pcs': MAX_NUM x N_i x 3
                 The points sampled from broken surface.
 
             'trans': MAX_NUM x 3
@@ -226,22 +238,19 @@ class GeometryPartDataset(Dataset):
             'quat': MAX_NUM x 4
                 Rotation as quaternion.
 
-            'data_id': int
+        'data_id': int
                 ID of the data.
 
         }
         """
-        import jhutil;jhutil.jhprint(1111, pcs)
-        import jhutil;jhutil.jhprint(2222, breaking_pcs)
-        import jhutil;jhutil.jhprint(3333, quat)
-        import jhutil;jhutil.jhprint(4444, trans)
 
         data_dict = {
             'pcs': pcs,
-            'breaking_pcs': breaking_pcs,
+            'broken_pcs': broken_pcs,
             'quat': quat,
             'trans': trans,
-            'data_id': index
+            'data_id': index,
+            'data_path': self.data_dir + "/" + self.data_list[index],
         }
         
         return data_dict
@@ -251,6 +260,31 @@ class GeometryPartDataset(Dataset):
 
 
 def build_geometry_dataloader(cfg):
+    train_set, val_set = build_geometry_dataset(cfg)
+    
+    train_loader = DataLoader(
+        dataset=train_set,
+        batch_size=cfg.exp.batch_size,
+        shuffle=True,
+        num_workers=cfg.exp.num_workers,
+        pin_memory=True,
+        drop_last=True,
+        persistent_workers=(cfg.exp.num_workers > 0),
+    )
+
+    val_loader = DataLoader(
+        dataset=val_set,
+        batch_size=cfg.exp.batch_size * 2,
+        shuffle=False,
+        num_workers=cfg.exp.num_workers,
+        pin_memory=True,
+        drop_last=False,
+        persistent_workers=(cfg.exp.num_workers > 0),
+    )
+    return train_loader, val_loader
+
+
+def build_geometry_dataset(cfg):
     data_dict = dict(
         data_dir=cfg.data.data_dir,
         data_fn=cfg.data.data_fn.format('train'),
@@ -264,26 +298,8 @@ def build_geometry_dataloader(cfg):
         overfit=cfg.data.overfit,
     )
     train_set = GeometryPartDataset(**data_dict)
-    train_loader = DataLoader(
-        dataset=train_set,
-        batch_size=cfg.exp.batch_size,
-        shuffle=True,
-        num_workers=cfg.exp.num_workers,
-        pin_memory=True,
-        drop_last=True,
-        persistent_workers=(cfg.exp.num_workers > 0),
-    )
 
     data_dict['data_fn'] = cfg.data.data_fn.format('val')
     data_dict['shuffle_parts'] = False
     val_set = GeometryPartDataset(**data_dict)
-    val_loader = DataLoader(
-        dataset=val_set,
-        batch_size=cfg.exp.batch_size * 2,
-        shuffle=False,
-        num_workers=cfg.exp.num_workers,
-        pin_memory=True,
-        drop_last=False,
-        persistent_workers=(cfg.exp.num_workers > 0),
-    )
-    return train_loader, val_loader
+    return train_set, val_set
