@@ -31,6 +31,7 @@ class GeometryPartDataset(Dataset):
         shuffle_parts=False,
         rot_range=-1,
         overfit=-1,
+        scale=1,
     ):
         # store parameters
         self.category = category if category.lower() != 'all' else ''
@@ -41,6 +42,7 @@ class GeometryPartDataset(Dataset):
         self.max_num_part = max_num_part  # ignore shapes with more parts
         self.shuffle_parts = shuffle_parts  # shuffle part orders
         self.rot_range = rot_range  # rotation range in degree
+        self.scale = scale
         
         # list of fracture folder path
         self.data_list = self._read_data(data_fn)
@@ -144,7 +146,6 @@ class GeometryPartDataset(Dataset):
         return distance, indices
 
     def _get_broken_pcs_idxs(self, points, threshold=0.01):
-        import jhutil;jhutil.jhprint(0000, points)
         indices = []
 
         for i in range(len(points)):
@@ -164,19 +165,19 @@ class GeometryPartDataset(Dataset):
         """Read mesh and sample point cloud from a folder."""
         # `data_folder`: xxx/plate/1d4093ad2dfad9df24be2e4f911ee4af/fractured_0
         data_folder = os.path.join(self.data_dir, data_folder)
-        mesh_files = os.listdir(data_folder)
-        mesh_files.sort()
-        if not self.min_num_part <= len(mesh_files) <= self.max_num_part:
+        file_names = os.listdir(data_folder)
+        file_names.sort()
+        if not self.min_num_part <= len(file_names) <= self.max_num_part:
             raise ValueError
 
         # shuffle part orders
         if self.shuffle_parts:
-            random.shuffle(mesh_files)
-
+            random.shuffle(file_names)
+        
         # read mesh and sample points
         meshes = [
             trimesh.load(os.path.join(data_folder, mesh_file))
-            for mesh_file in mesh_files
+            for mesh_file in file_names
         ]
         
         # calculate surface area and ratio
@@ -191,17 +192,18 @@ class GeometryPartDataset(Dataset):
             if num_sample < 10:
                 num_sample = 10
             samples = trimesh.sample.sample_surface(mesh, num_sample)[0]
+            samples = self.scale * samples
             pcs.append(torch.Tensor(samples))
         
-        return pcs
+        return pcs, file_names
 
     def get_original_pcs(self, index):
-        pcs = self._get_pcs(self.data_list[index])
+        pcs, _ = self._get_pcs(self.data_list[index])
         return pcs
     
     def __getitem__(self, index):
             
-        pcs = self._get_pcs(self.data_list[index])
+        pcs, file_names = self._get_pcs(self.data_list[index])
 
         broken_indices = self._get_broken_pcs_idxs(pcs)
         
@@ -250,7 +252,8 @@ class GeometryPartDataset(Dataset):
             'quat': quat,
             'trans': trans,
             'data_id': index,
-            'data_path': self.data_dir + "/" + self.data_list[index],
+            'dir_name': self.data_dir + "/" + self.data_list[index],
+            'file_names': file_names,
         }
         
         return data_dict
@@ -296,6 +299,7 @@ def build_geometry_dataset(cfg):
         shuffle_parts=cfg.data.shuffle_parts,
         rot_range=cfg.data.rot_range,
         overfit=cfg.data.overfit,
+        scale=cfg.data.scale,
     )
     train_set = GeometryPartDataset(**data_dict)
 
