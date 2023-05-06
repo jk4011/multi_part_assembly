@@ -53,6 +53,20 @@ class GeometryPartDataset(Dataset):
         if isinstance(data_keys, str):
             data_keys = [data_keys]
         self.data_keys = data_keys
+        
+        # read rotation_cache
+        try:
+            rotation_cache = np.load(os.path.join(self.data_dir, 'rotation_cache.npy'), allow_pickle=True)
+            self.rotation_cache = dict(rotation_cache.item())
+        except:
+            self.rotation_cache = {}
+
+
+    def __del__(self):
+        
+        np.save(os.path.join(self.data_dir, 'rotation_cache.npy'), self.rotation_cache)
+        # pass
+    
 
     def _read_data(self, data_fn):
         """Filter out invalid number of parts."""
@@ -87,13 +101,20 @@ class GeometryPartDataset(Dataset):
         pc = pc - centroid[None]
         return pc, centroid
 
-    def _rotate_pc(self, pc):
-        """pc: [N, 3]"""
-        if self.rot_range > 0.:
-            rot_euler = (np.random.rand(3) - 0.5) * 2. * self.rot_range
-            rot_mat = R.from_euler('xyz', rot_euler, degrees=True).as_matrix()
+    def _get_rotation_matrix(self, file_name):
+        if file_name in self.rotation_cache:
+            rot_mat = self.rotation_cache[file_name]
         else:
-            rot_mat = R.random().as_matrix()
+            if self.rot_range > 0.:
+                rot_euler = (np.random.rand(3) - 0.5) * 2. * self.rot_range
+                rot_mat = R.from_euler('xyz', rot_euler, degrees=True).as_matrix()
+            else:
+                rot_mat = R.random().as_matrix()
+            self.rotation_cache[file_name] = rot_mat
+        return rot_mat
+    
+    def _rotate_pc(self, pc, rot_mat):
+        """pc: [N, 3]"""
         rot_mat = torch.Tensor(rot_mat)
         pc = (rot_mat @ pc.T).T
         quat_gt = R.from_matrix(rot_mat.T).as_quat()
@@ -110,8 +131,8 @@ class GeometryPartDataset(Dataset):
         return pc
 
 
-    def _knn(self, src, dst, k=1, is_naive=False):
-        """return k nearest neighbors using GPU"""
+    def _knn(self, src, dst, k=1, is_naive=True):
+        """return k nearest neighbors"""
         if len(src) * len(dst) > 10e8:
             # TODO: optimize memory through recursion
             pass
@@ -125,9 +146,7 @@ class GeometryPartDataset(Dataset):
         assert(len(dst.shape) == 2)
         assert(src.shape[-1] == dst.shape[-1])
         
-        src = src.cuda()
-        dst = dst.cuda()
-        
+        # cpu or gpu, memory inefficient
         if is_naive: 
             src = src.reshape(-1, 1, src.shape[-1])
             distance = torch.norm(src - dst, dim=-1)
@@ -135,8 +154,12 @@ class GeometryPartDataset(Dataset):
             knn = distance.topk(k, largest=False)
             distance = knn.values
             indices = knn.indices
+        
+        # gpu 
+        else:
+            src = src.cuda().contiguous()
+            dst = dst.cuda().contiguous()
             
-        else: # memory efficient
             knn = KNN(k=1, transpose_mode=True)
             distance, indices = knn(dst[None, :], src[None, :]) 
         
@@ -155,11 +178,36 @@ class GeometryPartDataset(Dataset):
             for j in range(len(points)):
                 if i == j:
                     continue
+                if not self._point_overlap(points[i], points[j]):
+                    continue
                 distances, _ = self._knn(points[i], points[j])
                 idx_i = torch.logical_or(idx_i, distances < threshold)
             indices.append(idx_i)
         
         return indices
+    
+    def _point_overlap(self, src, ref):
+        # src : (N, 3)
+        # ref : (M, 3)
+        src_min = src.min(axis=0)[0]  # (3,)
+        src_max = src.max(axis=0)[0]  # (3,)
+        ref_min = ref.min(axis=0)[0]  # (3,)
+        ref_max = ref.max(axis=0)[0]  # (3,)
+        
+        # Check x-axis overlap
+        if src_max[0] < ref_min[0] or src_min[0] > ref_max[0]:
+            return False
+        
+        # Check y-axis overlap
+        if src_max[1] < ref_min[1] or src_min[1] > ref_max[1]:
+            return False
+        
+        # Check z-axis overlap
+        if src_max[2] < ref_min[2] or src_min[2] > ref_max[2]:
+            return False
+        
+        return True
+
 
     def _get_pcs(self, data_folder):
         """Read mesh and sample point cloud from a folder."""
@@ -196,34 +244,133 @@ class GeometryPartDataset(Dataset):
             pcs.append(torch.Tensor(samples))
         
         return pcs, file_names
+    
+    
+    def _get_broken_pcs(self, data_folder):
+        """Read mesh and sample point cloud from a folder."""
+        # `data_folder`: xxx/plate/1d4093ad2dfad9df24be2e4f911ee4af/fractured_0
+        data_folder = os.path.join(self.data_dir, data_folder)
+        file_names = os.listdir(data_folder)
+        file_names.sort()
+        if not self.min_num_part <= len(file_names) <= self.max_num_part:
+            raise ValueError
+
+        # shuffle part orders
+        if self.shuffle_parts:
+            random.shuffle(file_names)
+        
+        # read mesh and sample points
+        meshes = [
+            trimesh.load(os.path.join(data_folder, mesh_file))
+            for mesh_file in file_names
+        ]
+        
+        # calculate surface area and ratio
+        surface_areas = [mesh.area for mesh in meshes]
+        total_area = sum(surface_areas)
+        pcs_ratios = [area / total_area for area in surface_areas]
+
+        # parsing into list
+        vertices_list = [] # (N, v_i, 3)
+        faces_list = []  # (N, f_i, 3)
+        area_faces_list = [] # (N, f_i)
+        for mesh in meshes:
+            faces = torch.Tensor(mesh.faces) # (f_i, 3)
+            vertices = torch.Tensor(mesh.vertices) # (v_i, 3)
+            area_faces = torch.Tensor(mesh.area_faces) # (f_i)
+            
+            faces_list.append(faces)
+            vertices_list.append(vertices)
+            area_faces_list.append(area_faces)
+            
+        is_pts_broken_list = self._get_broken_pcs_idxs(vertices_list, 0.005) # (N, v_i)
+        is_face_broken_list = [] # (N, f_i)
+        for faces, is_pts_broken, vertices in zip(faces_list, is_pts_broken_list, vertices_list):
+            
+            is_face_broken = [] # (f_i, )
+            for vertex_idx in faces:
+                vertex_idx = vertex_idx.long()
+                is_vertex_broken = is_pts_broken[vertex_idx] # (3, )
+                is_face_broken.append(torch.all(is_vertex_broken))
+            is_face_broken_list.append(torch.tensor(is_face_broken))
+
+        # if not broken surface, area = 0
+        borken_surface_area_list = [] # (N, f_i)
+        for is_face_broken, area_faces in zip(is_face_broken_list, area_faces_list):
+            borken_surface_area = torch.zeros_like(area_faces)
+            borken_surface_area[is_face_broken] = area_faces[is_face_broken]
+            borken_surface_area_list.append(borken_surface_area)
+            
+        surface_areas = [torch.sum(area_faces) for area_faces in borken_surface_area_list]
+
+        total_area = sum(surface_areas)
+        pcs_ratios = [area / total_area for area in surface_areas]
+
+        # sample
+        broken_pcs = []
+        for mesh, ratio, face_weight in zip(meshes, pcs_ratios, borken_surface_area_list):
+            num_sample = int(self.total_points * ratio)
+            if num_sample < 10: 
+                num_sample = 10
+            face_weight = face_weight.numpy()
+            samples = trimesh.sample.sample_surface(mesh, num_sample, face_weight)[0]
+            samples = self.scale * samples
+            broken_pcs.append(torch.Tensor(samples))
+
+        
+        return broken_pcs, file_names
 
     def get_original_pcs(self, index):
         pcs, _ = self._get_pcs(self.data_list[index])
         return pcs
     
-    def __getitem__(self, index):
+    def __getitem__(self, index, sample_from_broken_face=True):            
+        data_folder = self.data_list[index]
+        
+        if sample_from_broken_face:
+            pcs = None
+            broken_pcs, file_names = self._get_broken_pcs(data_folder)
+            num_parts = len(broken_pcs)
+            quat, trans = [], []
+            for i in range(num_parts):
+                
+                file_name = os.path.join(data_folder, file_names[i])
+                rot_mat = self._get_rotation_matrix(file_name)
+                
+                pc = broken_pcs[i]
+                pc, gt_trans = self._recenter_pc(pc)
+                pc, gt_quat = self._rotate_pc(pc, rot_mat)
+                quat.append(gt_quat)
+                trans.append(gt_trans)
+                
+                broken_pcs[i] = pc
             
-        pcs, file_names = self._get_pcs(self.data_list[index])
 
-        broken_indices = self._get_broken_pcs_idxs(pcs)
-        
-        # random rotate and translate
-        num_parts = len(pcs)
-        quat, trans = [], []
-        for i in range(num_parts):
-            pc = pcs[i]
+        else:
+            pcs, file_names = self._get_pcs(data_folder)
+
+            broken_indices = self._get_broken_pcs_idxs(pcs)
             
-            pc, gt_trans = self._recenter_pc(pc)
-            pc, gt_quat = self._rotate_pc(pc)
-            quat.append(gt_quat)
-            trans.append(gt_trans)
+            # random rotate and translate
+            num_parts = len(pcs)
+            quat, trans = [], []
+            for i in range(num_parts):
+                
+                file_name = os.path.join(data_folder, file_names[i])
+                rot_mat = self._get_rotation_matrix(file_name)
+                
+                pc = pcs[i]
+                pc, gt_trans = self._recenter_pc(pc)
+                pc, gt_quat = self._rotate_pc(pc, rot_mat)
+                quat.append(gt_quat)
+                trans.append(gt_trans)
+                
+                pcs[i] = pc
             
-            pcs[i] = pc
+            broken_pcs = [pc[idx] for pc, idx in zip(pcs, broken_indices)]
         
-        broken_pcs = [pc[idx] for pc, idx in zip(pcs, broken_indices)]
-        
-        # shuffle points
-        pcs = [self._shuffle_pc(pc) for pc in pcs]
+            # shuffle points
+            pcs = [self._shuffle_pc(pc) for pc in pcs]
         broken_pcs = [self._shuffle_pc(pc) for pc in broken_pcs]
         
         """
