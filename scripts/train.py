@@ -21,8 +21,6 @@ def main(cfg):
     print(dict(cfg['data']))
     train_loader, val_loader = build_dataloader(cfg)
     for data in train_loader:
-        
-        import jhutil;jhutil.jhprint(9999, data)
         break
     exit()
 
