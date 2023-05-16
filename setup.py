@@ -14,7 +14,7 @@ def get_version():
 
 
 setup(
-    name="multi_part_assembly",
+    name="multi_part_assembly_original",
     version=get_version(),
     description="Code for Learning 3D Geometric Shape Assembly",
     long_description="Code for Learning 3D Geometric Shape Assembly",
