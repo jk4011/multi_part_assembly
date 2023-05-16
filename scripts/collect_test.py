@@ -11,8 +11,8 @@ import numpy as np
 import torch
 import pytorch_lightning as pl
 
-from multi_part_assembly.datasets import build_dataloader
-from multi_part_assembly.models import build_model
+from multi_part_assembly_original.datasets import build_dataloader
+from multi_part_assembly_original.models import build_model
 
 
 def find_last_ckp(ckp_dir):

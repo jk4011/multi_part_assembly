@@ -9,9 +9,9 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 
-from multi_part_assembly.datasets import build_dataloader
-from multi_part_assembly.models import build_model
-from multi_part_assembly.utils import PCAssemblyLogCallback
+from multi_part_assembly_original.datasets import build_dataloader
+from multi_part_assembly_original.models import build_model
+from multi_part_assembly_original.utils import PCAssemblyLogCallback
 
 
 def main(cfg):

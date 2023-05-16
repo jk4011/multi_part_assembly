@@ -10,9 +10,9 @@ from tqdm import tqdm
 
 import torch
 
-from multi_part_assembly.datasets import build_dataloader
-from multi_part_assembly.models import build_model
-from multi_part_assembly.utils import trans_rmat_to_pmat, trans_quat_to_pmat, \
+from multi_part_assembly_original.datasets import build_dataloader
+from multi_part_assembly_original.models import build_model
+from multi_part_assembly_original.utils import trans_rmat_to_pmat, trans_quat_to_pmat, \
     quaternion_to_rmat, save_pc, Rotation3D
 
 
