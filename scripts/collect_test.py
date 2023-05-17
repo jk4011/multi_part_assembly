@@ -31,7 +31,6 @@ def find_last_ckp(ckp_dir):
 def test(cfg):
     # Initialize model
     model = build_model(cfg)
-
     all_gpus = list(cfg.exp.gpus)
     trainer = pl.Trainer(
         gpus=all_gpus,

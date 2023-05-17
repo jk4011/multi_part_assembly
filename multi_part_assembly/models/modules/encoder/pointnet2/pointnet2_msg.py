@@ -1,8 +1,8 @@
 import torch.nn as nn
 
-# from pointnet2_ops.pointnet2_modules import PointnetSAModule, PointnetSAModuleMSG
+from pointnet2_ops.pointnet2_modules import PointnetSAModule, PointnetSAModuleMSG
 
-# from .pointnet2_ssg import PointNet2SSG
+from .pointnet2_ssg import PointNet2SSG
 
 
 class PointNet2MSG(PointNet2SSG):

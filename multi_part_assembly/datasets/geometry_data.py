@@ -12,6 +12,8 @@ from knn_cuda import KNN
 from functools import lru_cache
 import jhutil
 
+from copy import copy
+
 
 class GeometryPartDataset(Dataset):
     """Geometry part assembly dataset.
@@ -48,8 +50,10 @@ class GeometryPartDataset(Dataset):
 
         # list of fracture folder path
         self.data_list = self._read_data(data_fn)
+
         if overfit > 0:
             self.data_list = self.data_list[:overfit]
+        # self.data_list = ['artifact/101902_sf/mode_4', 'artifact/101902_sf/mode_2'] + self.data_list
 
         # additional data to load, e.g. ('part_ids', 'instance_label')
         if isinstance(data_keys, str):
@@ -57,11 +61,11 @@ class GeometryPartDataset(Dataset):
         self.data_keys = data_keys
 
         # read rotation_cache
-        try:
-            rotation_cache = np.load(os.path.join(
-                self.data_dir, 'rotation_cache.npy'), allow_pickle=True)
+        cache_path = os.path.join(self.data_dir, 'rotation_cache.npy')
+        if os.path.isfile(cache_path):
+            rotation_cache = np.load(cache_path, allow_pickle=True)
             self.rotation_cache = dict(rotation_cache.item())
-        except:
+        else:
             self.rotation_cache = {}
 
     def get_length_list(self):
@@ -322,6 +326,7 @@ class GeometryPartDataset(Dataset):
             broken_pcs.append(torch.Tensor(samples))
 
         data = {
+            'overlap_ratios': overlap_ratios,  # (N, N)
             'broken_pcs': broken_pcs,  # (N, p_i, 3)
             'file_names': file_names,  # (N, )
             'adjacent_pair': adjacent_pair,  # (ap, 2)
@@ -338,9 +343,10 @@ class GeometryPartDataset(Dataset):
         if sample_from_broken_face:
             pcs = None
             data = self._get_broken_data(data_folder)
-            broken_pcs = data["broken_pcs"]
-            file_names = data["file_names"]
-            adjacent_pair = data["adjacent_pair"]
+            broken_pcs = copy(data["broken_pcs"])
+            file_names = copy(data["file_names"])
+            adjacent_pair = copy(data["adjacent_pair"])
+            overlap_ratios = copy(data["overlap_ratios"])
 
             num_parts = len(broken_pcs)
             quat, trans = [], []
@@ -349,11 +355,18 @@ class GeometryPartDataset(Dataset):
                 file_name = os.path.join(data_folder, file_names[i])
                 rot_mat = self._get_rotation_matrix(file_name)
 
-                pc = broken_pcs[i]
-                pc, gt_trans = self._recenter_pc(pc)
+                pc_origin = broken_pcs[i]
+                pc, gt_trans = self._recenter_pc(pc_origin)
                 pc, gt_quat = self._rotate_pc(pc, rot_mat)
                 quat.append(gt_quat)
                 trans.append(gt_trans)
+
+                # check the rotation and translation are correct
+                pc_recovered = jhutil.quat_trans_transform(gt_quat, gt_trans, pc.double())
+                diff = torch.abs(pc_origin - pc_recovered)
+
+                assert torch.all(diff < 1e-5), "all pcs must be recovered within 1e-5"
+                assert diff.mean().item() < 1e-6, "mean of diff must be less than 1e-6"
 
                 broken_pcs[i] = pc
 
@@ -383,6 +396,7 @@ class GeometryPartDataset(Dataset):
 
             # shuffle points
             pcs = [self._shuffle_pc(pc) for pc in pcs]
+
         broken_pcs = [self._shuffle_pc(pc) for pc in broken_pcs]
 
         """
@@ -414,6 +428,7 @@ class GeometryPartDataset(Dataset):
             'dir_name': self.data_dir + "/" + self.data_list[index],
             'file_names': file_names,
             'adjacent_pair': adjacent_pair,
+            'overlap_ratios': overlap_ratios,
         }
 
         return data_dict
@@ -453,7 +468,6 @@ def build_geometry_dataset(cfg):
         data_fn=cfg.data.data_fn.format('train'),
         data_keys=cfg.data.data_keys,
         category=cfg.data.category,
-        total_points=cfg.data.total_points,
         min_num_part=cfg.data.min_num_part,
         max_num_part=cfg.data.max_num_part,
         shuffle_parts=cfg.data.shuffle_parts,
