@@ -146,6 +146,28 @@ class GeometryPartDataset(Dataset):
         pc = pc[order]
         return pc
 
+    def _get_overlap_ratio(self, src_mesh, ref_mesh, threshold=0.01):
+
+        src_v = torch.Tensor(src_mesh.vertices)  # (v, 3)
+        ref_v = torch.Tensor(ref_mesh.vertices)  # (w, 3)
+
+        distances, _ = jhutil.knn(src_v, ref_v, k=1)
+        src_v_is_joint = (distances < threshold).ravel()  # (v, ) ∈ {0, 1}
+
+        src_faces = torch.Tensor(src_mesh.faces)     # (f_i, 3) ∈ {0, ..., v-1}
+        src_f_is_joint = torch.zeros(len(src_faces))  # (f_i, ) ∈ {0, 1}
+        for i, face_v in enumerate(src_faces):
+            face_v_is_joint = src_v_is_joint[face_v]  # (3, ) ∈ {0, 1}
+            src_f_is_joint[i] = torch.all(face_v_is_joint)
+            
+        area_faces = torch.Tensor(src_mesh.area_faces)
+        total_area = area_faces.sum()
+        joint_area = (area_faces * src_f_is_joint).sum()
+        
+        overlap_ratio = (joint_area / total_area).item()
+
+        return overlap_ratio
+
     def _get_broken_pcs_idxs(self, points, threshold=0.01):
         broken_pcs_idxs = []
 
@@ -255,7 +277,6 @@ class GeometryPartDataset(Dataset):
         data_folder = os.path.join(self.data_dir, data_folder)
         file_names = os.listdir(data_folder)
         file_names = [fn for fn in file_names if fn.endswith('.obj')]
-        file_names.sort()
         if not self.min_num_part <= len(file_names) <= self.max_num_part:
             raise ValueError
 
@@ -268,7 +289,22 @@ class GeometryPartDataset(Dataset):
             trimesh.load(os.path.join(data_folder, mesh_file))
             for mesh_file in file_names
         ]
+        
+        overlap_ratios = torch.zeros(len(meshes), len(meshes))
+        for i in len(meshes):
+            for j in len(meshes):
+                if i == j:
+                    overlap_ratios[i][j] = -1
+                    continue
+                if not self._box_overlap(meshes[i].vertices, meshes[j].vertices):
+                    continue
+                overlap_ratios[i][j] = self._get_overlap_ratio(meshes[i], meshes[j])
 
+        
+        import jhutil; jhutil.jhprint(0000, overlap_ratios)
+        exit()
+        
+        
         # calculate surface area and ratio
         surface_areas = [mesh.area for mesh in meshes]
         total_area = sum(surface_areas)
@@ -287,8 +323,7 @@ class GeometryPartDataset(Dataset):
             vertices_list.append(vertices)
             area_faces_list.append(area_faces)
 
-        is_pts_broken_list = self._get_broken_pcs_idxs(
-            vertices_list, 0.005)  # (N, v_i)
+        is_pts_broken_list = self._get_broken_pcs_idxs(vertices_list, 0.005)  # (N, v_i)
         adjacent_pair = self._get_adjacent_pair(vertices_list)  # (ap, 2)
         is_face_broken_list = []  # (N, f_i)
         for faces, is_pts_broken, vertices in zip(faces_list, is_pts_broken_list, vertices_list):
@@ -324,6 +359,9 @@ class GeometryPartDataset(Dataset):
                 mesh, num_sample, face_weight)[0]
             samples = self.scale * samples
             broken_pcs.append(torch.Tensor(samples))
+        
+                
+                
 
         data = {
             'overlap_ratios': overlap_ratios,  # (N, N)
