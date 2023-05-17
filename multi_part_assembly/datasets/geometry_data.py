@@ -291,18 +291,17 @@ class GeometryPartDataset(Dataset):
         ]
         
         overlap_ratios = torch.zeros(len(meshes), len(meshes))
-        for i in len(meshes):
-            for j in len(meshes):
+        for i in range(len(meshes)):
+            for j in range(len(meshes)):
                 if i == j:
                     overlap_ratios[i][j] = -1
                     continue
-                if not self._box_overlap(meshes[i].vertices, meshes[j].vertices):
+                src_v = torch.Tensor(meshes[i].vertices)
+                ref_v = torch.Tensor(meshes[j].vertices)
+                if not self._box_overlap(src_v, ref_v):
                     continue
                 overlap_ratios[i][j] = self._get_overlap_ratio(meshes[i], meshes[j])
 
-        
-        import jhutil; jhutil.jhprint(0000, overlap_ratios)
-        exit()
         
         
         # calculate surface area and ratio
