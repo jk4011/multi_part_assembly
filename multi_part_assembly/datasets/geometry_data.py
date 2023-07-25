@@ -54,8 +54,7 @@ class GeometryPartDataset(Dataset):
         self.overfit = overfit
 
         super().__init__(root=data_dir, transform=None, pre_transform=None)
-        num_objs_path = os.path.join(self.processed_dir, f"{self.data_fn.split('.txt')[0]}.num_obj_dir.pt")
-        self.num_objs = torch.load(num_objs_path)
+        self.num_objs = self.load_num_objs()
 
         print("init done")
 
@@ -67,6 +66,42 @@ class GeometryPartDataset(Dataset):
             data_lengs.append(len(file_names))
         return data_lengs
 
+    def load_num_objs(self):
+        num_objs_path = os.path.join(self.processed_dir, f"{self.data_fn.split('.txt')[0]}.num_obj_dir.pt")
+        if os.path.exists(num_objs_path):
+            num_objs = torch.load(num_objs_path)
+            return num_objs[:self.overfit]
+        
+        """Filter out invalid number of parts."""
+        with open(os.path.join(self.raw_dir, self.data_fn), 'r') as f:
+            mesh_list = [line.strip() for line in f.readlines()]
+            if self.category:
+                mesh_list = [
+                    line for line in mesh_list
+                    if self.category in line.split('/')
+                ]
+        num_objs = []
+        for mesh in mesh_list:
+            mesh_dir = os.path.join(self.raw_dir, mesh)
+            if not os.path.isdir(mesh_dir):
+                print(f'{mesh} does not exist')
+                continue
+            for frac in os.listdir(mesh_dir):
+                # we take both fractures and modes for training
+                if 'fractured' not in frac and 'mode' not in frac:
+                    continue
+                frac = os.path.join(mesh, frac)
+                file_names = os.listdir(os.path.join(self.raw_dir, frac))
+                file_names = [fn for fn in file_names if fn.endswith('.obj')]
+                num_parts = len(file_names)
+                if self.min_num_part <= num_parts <= self.max_num_part:
+                    num_objs.append(num_parts)
+        
+        torch.save(num_objs, num_objs_path)
+        
+        return num_objs[:self.overfit]
+    
+    
     @property
     @lru_cache(maxsize=1)
     def raw_file_names(self):
@@ -242,11 +277,13 @@ class GeometryPartDataset(Dataset):
                 is_face_broken.append(torch.all(is_vertex_broken))
             is_broken_face_all.append(torch.tensor(is_face_broken))
 
+        # TODO: error나면 copy 때문인지 확인하기
         data = {
             "meshes": meshes,
             'is_broken_vertices': is_pts_broken_all,  # (N, v_i)
             'is_broken_face': is_broken_face_all,  # (N, f_i)
             'file_names': file_names,  # (N, )
+            'dir_name': data_folder,
         }
         return data
 
@@ -313,31 +350,22 @@ class GeometryPartDataset(Dataset):
         return len(self.raw_file_names)
 
     def process(self):
-        num_objs = []
 
         for data_folder, prossed_path in tqdm(list(zip(self.raw_paths, self.processed_paths))):
             if os.path.exists(prossed_path):
                 continue
 
             data = self._parse_data(data_folder)
-
-            # TODO: error나면 copy 때문인지 확인하기
-            data['dir_name'] = data_folder
-            num_parts = len(data["file_names"])
-            
-            num_objs.append(num_parts)
             
             directory = os.path.dirname(prossed_path)
             if not os.path.exists(directory):
                 os.makedirs(directory)
             torch.save(data, prossed_path)
-        num_objs_path = os.path.join(self.processed_dir, f"{self.data_fn.split('.txt')[0]}.num_obj_dir.pt")
-        torch.save(num_objs, num_objs_path)
+
 
     @lru_cache(maxsize=100)
     def load_data(self, path):
         return torch.load(path)
-    
     
     @lru_cache(maxsize=100)
     def get(self, idx):
